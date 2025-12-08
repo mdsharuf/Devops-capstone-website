@@ -1,2 +1,43 @@
-http://34.220.135.68:8080/job/prod/build?token=MY_TOKEN
+version: 0.2
+
+env:
+  variables:
+    IMAGE_REPO_NAME: "website-app"
+    IMAGE_TAG: "latest"
+
+phases:
+  install:
+    commands:
+      - echo "Installing docker inside CodeBuild container"
+      - apt-get update -y || true
+      - apt-get install -y docker.io || true
+
+  pre_build:
+    commands:
+      - echo "Webhook head ref: $CODEBUILD_WEBHOOK_HEAD_REF"
+      - BRANCH_NAME="${CODEBUILD_WEBHOOK_HEAD_REF##refs/heads/}"
+      - echo "Resolved branch: $BRANCH_NAME"
+
+  build:
+    commands:
+      - echo "Running tests (placeholder)"
+      - echo "Building Docker image..."
+      - docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
+
+  post_build:
+    commands:
+      - |
+        if [ "$BRANCH_NAME" = "master" ]; then
+          echo "Master branch: trigger Jenkins prod job"
+          curl -X POST "http://34.220.135.68:8080/job/prod/build?token=MY_TOKEN"
+        elif [ "$BRANCH_NAME" = "develop" ]; then
+          echo "Develop branch: only test/build; no prod deploy"
+        else
+          echo "Other branch: do nothing special"
+        fi
+
+artifacts:
+  files:
+    - '**/*'
+
 
