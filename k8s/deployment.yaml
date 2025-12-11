@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capstone-website-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: capstone-website
+  template:
+    metadata:
+      labels:
+        app: capstone-website
+    spec:
+      containers:
+      - name: website
+        image: mdsharuf/devops-capstone-website:latest
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 20
