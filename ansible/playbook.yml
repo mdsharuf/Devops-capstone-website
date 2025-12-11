@@ -1,0 +1,169 @@
+---
+- name: Prepare all machines (update, install base packages)
+  hosts: all
+  become: yes
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install base packages
+      apt:
+        name:
+          - curl
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
+
+    - name: Ensure swap is off (temporary)
+      command: swapoff -a
+      ignore_errors: true
+
+    - name: Disable swap in fstab
+      replace:
+        path: /etc/fstab
+        regexp: '(^.*swap.*$)'
+        replace: '# \\1'
+      register: fstab_replace
+      ignore_errors: true
+
+- name: Install and configure Docker on all nodes
+  hosts: all
+  become: yes
+  tasks:
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker apt repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable
+        state: present
+
+    - name: Update apt cache after repo
+      apt:
+        update_cache: yes
+
+    - name: Install docker packages
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+
+    - name: Ensure docker service is running
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+      ignore_errors: true
+
+- name: Install kubeadm, kubelet, kubectl on all nodes
+  hosts: all
+  become: yes
+  tasks:
+    - name: Add Kubernetes apt key
+      apt_key:
+        url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+        state: present
+
+    - name: Add Kubernetes apt repo
+      apt_repository:
+        repo: deb http://apt.kubernetes.io/ kubernetes-xenial main
+        state: present
+
+    - name: Update apt and install kube packages
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: yes
+
+    - name: Hold kube packages at current version
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        mark: hold
+
+- name: Initialize Kubernetes control plane on master
+  hosts: k8s_master
+  become: yes
+  tasks:
+    - name: Initialize kubeadm
+      command: >
+        kubeadm init --pod-network-cidr=10.244.0.0/16
+      args:
+        creates: /etc/kubernetes/admin.conf
+      register: kubeadm_init
+      failed_when: kubeadm_init.rc != 0 and 'already initialized' not in kubeadm_init.stderr
+
+    - name: Create .kube directory for ubuntu user
+      file:
+        path: /home/{{ ansible_user }}/.kube
+        state: directory
+        owner: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Copy admin.conf to user's kube config
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/{{ ansible_user }}/.kube/config
+        owner: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Install Flannel CNI (apply manifest)
+      become: yes
+      become_user: "{{ ansible_user }}"
+      shell: |
+        kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+      args:
+        warn: false
+
+    - name: Create join command script
+      shell: |
+        kubeadm token create --print-join-command > /tmp/kube_join_cmd.sh
+        chmod +x /tmp/kube_join_cmd.sh
+      register: join_cmd
+      changed_when: join_cmd.rc == 0
+
+    - name: Fetch join command content
+      slurp:
+        src: /tmp/kube_join_cmd.sh
+      register: join_script_base64
+
+    - name: Set join_command fact
+      set_fact:
+        kube_join_command: "{{ join_script_base64['content'] | b64decode }}"
+
+- name: Join workers to the cluster
+  hosts: k8s_workers
+  become: yes
+  tasks:
+    - name: Wait for SSH and connectivity
+      wait_for:
+        port: 22
+        timeout: 300
+
+    - name: Run the kubeadm join command from master
+      shell: "{{ hostvars[ groups['k8s_master'][0] ]['kube_join_command'] }}"
+      args:
+        warn: false
+      register: join_result
+      failed_when: join_result.rc != 0 and 'already joined' not in join_result.stderr
+
